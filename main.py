@@ -1,0 +1,834 @@
+import os
+import io
+import re
+import math
+import asyncio
+import discord
+from discord.ext import commands, tasks
+import aiohttp
+from PIL import Image, ImageDraw, ImageFont
+from dotenv import load_dotenv
+
+# ─────────────────────────────────────────────
+# Загрузка переменных окружения
+# ─────────────────────────────────────────────
+load_dotenv()
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+
+def _to_int(value: str):
+    value = (value or "").strip()
+    return int(value) if value.isdigit() else None
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_color(name: str, default=(255, 255, 255)):
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        parts = [int(x) for x in raw.split(",")]
+        if len(parts) == 3:
+            return tuple(parts)
+    except ValueError:
+        pass
+    return default
+
+
+def parse_tag_map(raw: str) -> dict:
+    mapping = {}
+    if not raw:
+        return mapping
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair or ":" not in pair:
+            continue
+        tag, cid = pair.split(":", 1)
+        tag = tag.strip().lower()
+        cid = cid.strip()
+        if tag and cid.isdigit():
+            mapping[tag] = int(cid)
+    return mapping
+
+
+# ─── Вотермарк ───
+SOURCE_CHANNEL_ID = _to_int(os.getenv("SOURCE_CHANNEL_ID", ""))
+TAG_MAP = parse_tag_map(os.getenv("TAG_MAP", ""))
+OWNER_USER_ID = _to_int(os.getenv("OWNER_USER_ID", ""))
+
+WATERMARK_LINES = os.getenv(
+    "WATERMARK_LINES",
+    "YouTube: NiOoooN\\nTrovo: NiOoooN\\nTwitch: NT_NiOoooN",
+).replace("\\n", "\n").split("\n")
+
+WATERMARK_ANGLE = _env_int("WATERMARK_ANGLE", -30)
+WATERMARK_OPACITY = _env_int("WATERMARK_OPACITY", 60)
+WATERMARK_COLOR = _env_color("WATERMARK_COLOR", (255, 255, 255))
+WATERMARK_FONT_SCALE = _env_float("WATERMARK_FONT_SCALE", 0.03)
+WATERMARK_STEP_X = _env_int("WATERMARK_STEP_X", 600)
+WATERMARK_STEP_Y = _env_int("WATERMARK_STEP_Y", 200)
+
+BADGE_PATH = os.getenv("BADGE_PATH", "badge.png")
+BADGE_SCALE = _env_float("BADGE_SCALE", 0.1)
+BADGE_PADDING = _env_float("BADGE_PADDING", 0.2)
+BADGE_OPACITY = _env_int("BADGE_OPACITY", 150)
+BADGE_TEXT = os.getenv("BADGE_TEXT", "")
+BADGE_TEXT_COLOR = _env_color("BADGE_TEXT_COLOR", (255, 255, 255))
+
+# ─── Роли ───
+JOIN_ROLE_ID = _to_int(os.getenv("JOIN_ROLE_ID", ""))
+UNVERIFIED_ROLE_ID = _to_int(os.getenv("UNVERIFIED_ROLE_ID", ""))
+MEMBER_ROLE_ID = _to_int(os.getenv("MEMBER_ROLE_ID", ""))
+
+# ─── Каналы ───
+VERIFY_CHANNEL_ID = _to_int(os.getenv("VERIFY_CHANNEL_ID", ""))
+LOG_CHANNEL_ID = _to_int(os.getenv("LOG_CHANNEL_ID", ""))
+
+# ─── Подсказка ───
+HINT_TITLE = os.getenv("HINT_TITLE", "📸 Как опубликовать пост")
+HINT_FOOTER = os.getenv("HINT_FOOTER", "Сообщения без тега удаляются автоматически")
+HINT_TEXT = os.getenv("HINT_TEXT", "").strip()
+
+# ─── Верификация ───
+VERIFY_TITLE = os.getenv("VERIFY_TITLE", "Верификация")
+VERIFY_DESCRIPTION = os.getenv(
+    "VERIFY_DESCRIPTION",
+    "Нажмите кнопку ниже, чтобы получить доступ к серверу.",
+)
+VERIFY_BUTTON_LABEL = os.getenv("VERIFY_BUTTON_LABEL", "✅ Верифицироваться")
+
+# ─── Отладка ───
+print("SOURCE_CHANNEL_ID =", SOURCE_CHANNEL_ID)
+print("TAG_MAP:")
+for tag, cid in TAG_MAP.items():
+    print(f"  #{tag} → {cid}")
+print("JOIN_ROLE_ID =", JOIN_ROLE_ID)
+print("UNVERIFIED_ROLE_ID =", UNVERIFIED_ROLE_ID)
+print("MEMBER_ROLE_ID =", MEMBER_ROLE_ID)
+print("VERIFY_CHANNEL_ID =", VERIFY_CHANNEL_ID)
+
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN не задан в .env")
+
+# ─────────────────────────────────────────────
+# Инициализация бота
+# ─────────────────────────────────────────────
+intents = discord.Intents.default()
+intents.message_content = True
+intents.messages = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+verify_message_id = None
+hint_message_id = None
+
+
+# ─────────────────────────────────────────────
+# Шрифты
+# ─────────────────────────────────────────────
+def load_font(size: int):
+    fonts = [
+        "arialbd.ttf",
+        "arial.ttf",
+        "Arial.ttf",
+        "DejaVuSans-Bold.ttf",
+        "DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf",
+        "/Library/Fonts/Arial Bold.ttf",
+        "C:\\Windows\\Fonts\\arialbd.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+    ]
+    for path in fonts:
+        try:
+            return ImageFont.truetype(path, size)
+        except (IOError, OSError):
+            continue
+    return ImageFont.load_default()
+
+
+# ─────────────────────────────────────────────
+# Диагональный тайл текста
+# ─────────────────────────────────────────────
+def _make_diagonal_tile(width: int, height: int) -> Image.Image:
+    font_size = max(14, int(min(width, height) * WATERMARK_FONT_SCALE))
+    font = load_font(font_size)
+
+    dummy = Image.new("RGBA", (10, 10))
+    dummy_draw = ImageDraw.Draw(dummy)
+
+    line_widths = []
+    line_heights = []
+    for line in WATERMARK_LINES:
+        bbox = dummy_draw.textbbox((0, 0), line, font=font)
+        line_widths.append(bbox[2] - bbox[0])
+        line_heights.append(bbox[3] - bbox[1])
+
+    line_height = max(line_heights) if line_heights else font_size
+    line_spacing = int(line_height * 1.3)
+    block_w = max(line_widths) if line_widths else 100
+    block_h = line_spacing * len(WATERMARK_LINES)
+
+    step_x = max(WATERMARK_STEP_X, block_w + 60)
+    step_y = max(WATERMARK_STEP_Y, block_h + 60)
+
+    diag = int(math.hypot(width, height)) + max(step_x, step_y)
+    canvas = Image.new("RGBA", (diag * 2, diag * 2), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+
+    color = (*WATERMARK_COLOR, WATERMARK_OPACITY)
+
+    cx, cy = canvas.width // 2, canvas.height // 2
+    cols = canvas.width // step_x + 2
+    rows = canvas.height // step_y + 2
+
+    for i in range(-cols // 2, cols // 2 + 1):
+        for j in range(-rows // 2, rows // 2 + 1):
+            base_x = cx + i * step_x
+            base_y = cy + j * step_y
+            for k, line in enumerate(WATERMARK_LINES):
+                draw.text(
+                    (base_x, base_y + k * line_spacing),
+                    line,
+                    font=font,
+                    fill=color,
+                )
+
+    rotated = canvas.rotate(WATERMARK_ANGLE, resample=Image.BICUBIC, expand=False)
+
+    left = (rotated.width - width) // 2
+    top = (rotated.height - height) // 2
+    return rotated.crop((left, top, left + width, top + height))
+
+
+# ─────────────────────────────────────────────
+# Бейдж в углу
+# ─────────────────────────────────────────────
+def _paste_badge(base: Image.Image) -> None:
+    if not BADGE_PATH:
+        return
+
+    badge_path = BADGE_PATH if os.path.isabs(BADGE_PATH) else os.path.join(BASE_DIR, BADGE_PATH)
+    if not os.path.exists(badge_path):
+        print(f"[BADGE] Логотип не найден: {badge_path}")
+        return
+
+    try:
+        badge = Image.open(badge_path).convert("RGBA")
+    except Exception as e:
+        print(f"[BADGE] Не удалось прочитать логотип: {e}")
+        return
+
+    width, height = base.size
+    badge_size = int(width * BADGE_SCALE)
+    badge = badge.resize((badge_size, badge_size), Image.LANCZOS)
+
+    # Полупрозрачность
+    alpha = badge.split()[3]
+    alpha = alpha.point(lambda p: int(p * (BADGE_OPACITY / 255)))
+    badge.putalpha(alpha)
+
+    pad = int(badge_size * BADGE_PADDING)
+
+    x = pad
+    y = height - badge_size - pad
+
+    text_height = 0
+    font = None
+    if BADGE_TEXT:
+        font_size = max(14, int(badge_size * 0.18))
+        font = load_font(font_size)
+        dummy = Image.new("RGBA", (10, 10))
+        bbox = ImageDraw.Draw(dummy).textbbox((0, 0), BADGE_TEXT, font=font)
+        text_height = (bbox[3] - bbox[1]) + int(badge_size * 0.1)
+        y -= text_height
+
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    layer.paste(badge, (x, y), badge)
+    base.alpha_composite(layer)
+
+    if BADGE_TEXT and font:
+        draw = ImageDraw.Draw(base)
+        bbox = draw.textbbox((0, 0), BADGE_TEXT, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_x = x + (badge_size - text_w) // 2
+        text_y = y + badge_size + int(badge_size * 0.05)
+
+        text_alpha = BADGE_OPACITY
+
+        outline = (0, 0, 0, int(text_alpha * 0.85))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                draw.text(
+                    (text_x + dx, text_y + dy),
+                    BADGE_TEXT,
+                    font=font,
+                    fill=outline,
+                )
+        draw.text(
+            (text_x, text_y),
+            BADGE_TEXT,
+            font=font,
+            fill=(*BADGE_TEXT_COLOR, text_alpha),
+        )
+
+
+# ─────────────────────────────────────────────
+# Главная функция вотермарки
+# ─────────────────────────────────────────────
+def add_watermark(image_bytes: bytes, username: str = "", date_str: str = "") -> io.BytesIO:
+    base = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    width, height = base.size
+
+    try:
+        tile = _make_diagonal_tile(width, height)
+        base = Image.alpha_composite(base, tile)
+    except Exception as e:
+        print(f"[WATERMARK] Ошибка диагонального тайла: {e}")
+
+    try:
+        _paste_badge(base)
+    except Exception as e:
+        print(f"[WATERMARK] Ошибка бейджа: {e}")
+
+    output = io.BytesIO()
+    base.save(output, format="PNG")
+    output.seek(0)
+    return output
+
+
+# ─────────────────────────────────────────────
+# Утилиты
+# ─────────────────────────────────────────────
+async def download_image(url: str):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                return None
+            return await resp.read()
+
+
+async def get_target_channel(channel_id: int):
+    channel = bot.get_channel(channel_id)
+    if channel is not None:
+        return channel
+    try:
+        return await bot.fetch_channel(channel_id)
+    except (discord.NotFound, discord.Forbidden):
+        return None
+
+
+def find_tag(text: str, message: discord.Message):
+    if text:
+        for word in re.findall(r"#([^\s#<>]+)", text):
+            key = word.strip().lower().strip(".,!?;:()[]{}")
+            if key in TAG_MAP:
+                return key
+
+    for channel in message.channel_mentions:
+        name = (channel.name or "").lower().strip()
+        if name in TAG_MAP:
+            return name
+    return None
+
+
+def strip_tag(text: str, tag: str) -> str:
+    if not text:
+        return text
+    pattern = re.compile(rf"#{re.escape(tag)}\b", re.IGNORECASE)
+    cleaned = pattern.sub("", text)
+    cleaned = re.sub(r"<#\d+>", "", cleaned)
+    lines = [ln.rstrip() for ln in cleaned.split("\n")]
+    return "\n".join(lines).strip()
+
+
+async def delete_message_safe(message: discord.Message):
+    try:
+        await message.delete()
+    except discord.Forbidden:
+        print(f"[DELETE] ❌ Нет права Manage Messages в канале {message.channel.id}")
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f"[DELETE] Ошибка: {e}")
+
+
+async def dm_user_safe(user: discord.User, text: str = None, embed: discord.Embed = None):
+    try:
+        if embed is not None:
+            await user.send(embed=embed)
+        elif text:
+            await user.send(text)
+    except discord.Forbidden:
+        pass
+    except Exception as e:
+        print(f"[DM] Ошибка: {e}")
+
+
+# ─────────────────────────────────────────────
+# Кнопка верификации
+# ─────────────────────────────────────────────
+class VerifyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label=VERIFY_BUTTON_LABEL,
+        style=discord.ButtonStyle.green,
+        custom_id="verify_button",
+    )
+    async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        member = interaction.user
+
+        if not MEMBER_ROLE_ID:
+            await interaction.response.send_message(
+                "❌ Роль Member не настроена.", ephemeral=True
+            )
+            return
+
+        member_role = guild.get_role(MEMBER_ROLE_ID)
+        if member_role is None:
+            await interaction.response.send_message(
+                "❌ Роль не найдена. Сообщите админу.", ephemeral=True
+            )
+            return
+
+        if member_role in member.roles:
+            await interaction.response.send_message(
+                "ℹ️ Вы уже верифицированы.", ephemeral=True
+            )
+            return
+
+        try:
+            if UNVERIFIED_ROLE_ID:
+                unverified = guild.get_role(UNVERIFIED_ROLE_ID)
+                if unverified and unverified in member.roles:
+                    await member.remove_roles(unverified, reason="Прошёл верификацию")
+
+            await member.add_roles(member_role, reason="Прошёл верификацию")
+
+            await interaction.response.send_message(
+                "✅ Готово! Добро пожаловать на сервер.", ephemeral=True
+            )
+
+            if LOG_CHANNEL_ID:
+                log = bot.get_channel(LOG_CHANNEL_ID)
+                if log:
+                    try:
+                        await log.send(
+                            f"✅ {member.mention} (`{member}`) прошёл верификацию."
+                        )
+                    except Exception:
+                        pass
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ У бота нет прав на выдачу роли.", ephemeral=True
+            )
+
+
+# ─────────────────────────────────────────────
+# Обслуживание канала верификации
+# ─────────────────────────────────────────────
+async def find_button_message(channel: discord.TextChannel):
+    try:
+        async for msg in channel.history(limit=50):
+            if msg.author == bot.user and msg.components:
+                return msg
+    except Exception as e:
+        print(f"[VERIFY] Не удалось прочитать историю: {e}")
+    return None
+
+
+async def publish_verify_button(channel: discord.TextChannel):
+    embed = discord.Embed(
+        title=VERIFY_TITLE,
+        description=VERIFY_DESCRIPTION,
+        color=discord.Color.green(),
+    )
+    embed.add_field(
+        name="Что делать?",
+        value=f"Нажмите кнопку **{VERIFY_BUTTON_LABEL}** ниже.",
+        inline=False,
+    )
+    try:
+        msg = await channel.send(embed=embed, view=VerifyView())
+        print("✅ Сообщение с кнопкой опубликовано.")
+        return msg
+    except Exception as e:
+        print(f"[VERIFY] Не удалось отправить сообщение: {e}")
+        return None
+
+
+async def purge_verify_channel(keep_id=None):
+    if not VERIFY_CHANNEL_ID:
+        return
+    channel = bot.get_channel(VERIFY_CHANNEL_ID)
+    if channel is None:
+        return
+    deleted = 0
+    try:
+        async for msg in channel.history(limit=200):
+            if keep_id and msg.id == keep_id:
+                continue
+            try:
+                await msg.delete()
+                deleted += 1
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                print("[PURGE] ❌ Нет права Manage Messages.")
+                return
+            except Exception as e:
+                print(f"[PURGE] Ошибка удаления: {e}")
+        if deleted:
+            print(f"[PURGE verify] Удалено: {deleted}")
+    except Exception as e:
+        print(f"[PURGE] Ошибка чтения истории: {e}")
+
+
+# ─────────────────────────────────────────────
+# Подсказка в source-канале
+# ─────────────────────────────────────────────
+async def find_hint_message(channel: discord.TextChannel):
+    try:
+        async for msg in channel.history(limit=50):
+            if msg.author == bot.user and msg.embeds:
+                for emb in msg.embeds:
+                    if emb.title == HINT_TITLE:
+                        return msg
+    except Exception as e:
+        print(f"[HINT] Не удалось прочитать историю: {e}")
+    return None
+
+
+def build_hint_embed() -> discord.Embed:
+    if HINT_TEXT:
+        body = HINT_TEXT
+    else:
+        tags_line = " · ".join(f"`#{t}`" for t in TAG_MAP.keys()) or "—"
+        body = (
+            f"**1.** Прикрепите одну или несколько картинок\n"
+            f"**2.** В тексте укажите **тег** из списка:\n"
+            f"{tags_line}\n"
+            f"**3.** Отправьте — бот опубликует пост в нужный канал\n\n"
+            f"**Пример:**\n"
+            f"```\n# ахтуба\nточка 123:123\nТроф Каспика\n25 кг\n(Ваши скрины до 5шт)```"
+        )
+
+    embed = discord.Embed(
+        title=HINT_TITLE,
+        description=body,
+        color=discord.Color.blue(),
+    )
+    if HINT_FOOTER:
+        embed.set_footer(text=HINT_FOOTER)
+    return embed
+
+
+async def publish_hint(channel: discord.TextChannel):
+    try:
+        msg = await channel.send(embed=build_hint_embed())
+        try:
+            await msg.pin(reason="Инструкция по публикации постов")
+        except discord.Forbidden:
+            print("[HINT] ❌ Нет права Manage Messages для закрепления.")
+        except Exception as e:
+            print(f"[HINT] Не удалось закрепить: {e}")
+        print("✅ Подсказка опубликована и закреплена.")
+        return msg
+    except Exception as e:
+        print(f"[HINT] Не удалось отправить подсказку: {e}")
+        return None
+
+
+async def purge_source_channel(keep_ids=None):
+    if not SOURCE_CHANNEL_ID:
+        return
+    channel = bot.get_channel(SOURCE_CHANNEL_ID)
+    if channel is None:
+        return
+
+    keep_ids = keep_ids or set()
+    deleted = 0
+    try:
+        async for msg in channel.history(limit=300):
+            if msg.id in keep_ids:
+                continue
+            if msg.pinned:
+                continue
+            if msg.author == bot.user and msg.embeds:
+                continue
+            try:
+                await msg.delete()
+                deleted += 1
+            except discord.Forbidden:
+                print("[PURGE] ❌ Нет права Manage Messages.")
+                return
+            except Exception:
+                pass
+        if deleted:
+            print(f"[PURGE source] Удалено: {deleted}")
+    except Exception as e:
+        print(f"[PURGE source] Ошибка: {e}")
+
+
+# ─────────────────────────────────────────────
+# Автоочистка
+# ─────────────────────────────────────────────
+@tasks.loop(minutes=5)
+async def auto_clean():
+    if hint_message_id:
+        await purge_source_channel(keep_ids={hint_message_id})
+    else:
+        await purge_source_channel()
+    await purge_verify_channel(keep_id=verify_message_id)
+
+
+@auto_clean.before_loop
+async def before_auto_clean():
+    await bot.wait_until_ready()
+
+
+# ─────────────────────────────────────────────
+# События
+# ─────────────────────────────────────────────
+@bot.event
+async def on_ready():
+    global verify_message_id, hint_message_id
+
+    print(f"Бот {bot.user} готов к работе!")
+
+    bot.add_view(VerifyView())
+
+    # ─── Подсказка в source-канале ───
+    if SOURCE_CHANNEL_ID:
+        src = bot.get_channel(SOURCE_CHANNEL_ID)
+        if src:
+            existing = await find_hint_message(src)
+            if existing:
+                hint_message_id = existing.id
+                print(f"Подсказка уже есть: {existing.id}")
+                if not existing.pinned:
+                    try:
+                        await existing.pin(reason="Перезакрепление подсказки")
+                    except Exception:
+                        pass
+            else:
+                msg = await publish_hint(src)
+                if msg:
+                    hint_message_id = msg.id
+        else:
+            print(f"❌ Source-канал {SOURCE_CHANNEL_ID} не найден.")
+
+    # ─── Канал верификации ───
+    if VERIFY_CHANNEL_ID:
+        channel = bot.get_channel(VERIFY_CHANNEL_ID)
+        if channel is None:
+            print(f"❌ Канал верификации {VERIFY_CHANNEL_ID} не найден.")
+        else:
+            existing = await find_button_message(channel)
+            if existing:
+                verify_message_id = existing.id
+                print(f"Сообщение с кнопкой найдено: {existing.id}")
+            else:
+                msg = await publish_verify_button(channel)
+                if msg:
+                    verify_message_id = msg.id
+            await purge_verify_channel(keep_id=verify_message_id)
+
+    if not auto_clean.is_running():
+        auto_clean.start()
+        print("Автоочистка запущена (каждые 5 минут).")
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    guild = member.guild
+
+    if JOIN_ROLE_ID:
+        role = guild.get_role(JOIN_ROLE_ID)
+        if role:
+            try:
+                await member.add_roles(role, reason="Автовыдача роли при входе")
+            except discord.Forbidden:
+                print(f"❌ Нет прав на выдачу роли {role.name}")
+
+    if UNVERIFIED_ROLE_ID:
+        role = guild.get_role(UNVERIFIED_ROLE_ID)
+        if role and role not in member.roles:
+            try:
+                await member.add_roles(role, reason="Новый участник — до верификации")
+            except discord.Forbidden:
+                print(f"❌ Нет прав на выдачу роли {role.name}")
+
+    # Приветствие в ЛС
+    try:
+        verify_channel = f"<#{VERIFY_CHANNEL_ID}>" if VERIFY_CHANNEL_ID else "#верификация"
+        source_channel = f"<#{SOURCE_CHANNEL_ID}>" if SOURCE_CHANNEL_ID else "#публикации"
+        tags_line = " · ".join(f"`#{t}`" for t in TAG_MAP.keys()) or "—"
+
+        embed = discord.Embed(
+            title=f"👋 Добро пожаловать, {member.display_name}!",
+            description=(
+                f"**1. Пройдите верификацию:** {verify_channel}\n"
+                f"**2. Публикуйте посты:** {source_channel}\n\n"
+                f"**Как публиковать:** прикрепите картинки и укажите тег:\n{tags_line}"
+            ),
+            color=discord.Color.green(),
+        )
+        await member.send(embed=embed)
+    except discord.Forbidden:
+        pass
+    except Exception as e:
+        print(f"[DM] Ошибка: {e}")
+
+    await purge_verify_channel(keep_id=verify_message_id)
+    if hint_message_id:
+        await purge_source_channel(keep_ids={hint_message_id})
+    else:
+        await purge_source_channel()
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    if SOURCE_CHANNEL_ID and message.channel.id == SOURCE_CHANNEL_ID:
+        # Не обрабатываем сообщение-подсказку
+        if hint_message_id and message.id == hint_message_id:
+            return
+
+        if OWNER_USER_ID is not None and message.author.id != OWNER_USER_ID:
+            await bot.process_commands(message)
+            return
+
+        tag = find_tag(message.content, message)
+
+        if tag is None:
+            await delete_message_safe(message)
+            tags_line = "\n".join(f"• `#{t}` → <#{cid}>" for t, cid in TAG_MAP.items())
+            embed = discord.Embed(
+                title="❌ Тег не найден",
+                description=(
+                    "В вашем сообщении не было тега.\n\n"
+                    "**Как правильно:**\n"
+                    "1. Прикрепите картинки\n"
+                    "2. Укажите **один** из тегов:\n\n"
+                    f"{tags_line}\n\n"
+                    "Пример:\n"
+                    "```\n# ахтуба\nТроф Каспика\n25 кг\n```"
+                ),
+                color=discord.Color.orange(),
+            )
+            await dm_user_safe(message.author, embed=embed)
+            return
+
+        image_attachments = [
+            a for a in message.attachments
+            if a.content_type and a.content_type.startswith("image/")
+        ]
+        if not image_attachments:
+            await delete_message_safe(message)
+            first_tag = list(TAG_MAP.keys())[0] if TAG_MAP else "тег"
+            embed = discord.Embed(
+                title="❌ Нет картинок",
+                description=(
+                    "К сообщению нужно прикрепить хотя бы одну картинку.\n\n"
+                    f"Пример: `#{first_tag}` + файл с картинкой."
+                ),
+                color=discord.Color.orange(),
+            )
+            await dm_user_safe(message.author, embed=embed)
+            return
+
+        target_id = TAG_MAP[tag]
+        target_channel = await get_target_channel(target_id)
+        if target_channel is None:
+            await dm_user_safe(
+                message.author,
+                f"❌ Не могу найти канал для тега `#{tag}` (ID {target_id}).",
+            )
+            return
+
+        date_str = message.created_at.strftime("%d.%m.%Y")
+        files = []
+
+        for idx, attachment in enumerate(image_attachments, start=1):
+            image_bytes = await download_image(attachment.url)
+            if image_bytes is None:
+                continue
+            try:
+                # Обработка Pillow в отдельном потоке — бот остаётся отзывчивым
+                loop = asyncio.get_event_loop()
+                watermarked = await loop.run_in_executor(
+                    None,
+                    add_watermark,
+                    image_bytes,
+                    message.author.display_name,
+                    date_str,
+                )
+                files.append(discord.File(fp=watermarked, filename=f"rf4_{idx}.png"))
+            except Exception as e:
+                print(f"Ошибка обработки {attachment.filename}: {e}")
+
+        if not files:
+            await dm_user_safe(message.author, "❌ Не удалось обработать изображения.")
+            return
+
+        text = strip_tag(message.content, tag)
+        if not text:
+            text = f"Улов от {message.author.display_name}"
+
+        MAX_FILES = 10
+        published = False
+        for i in range(0, len(files), MAX_FILES):
+            chunk = files[i:i + MAX_FILES]
+            content = text if i == 0 else None
+            try:
+                await target_channel.send(content=content, files=chunk)
+                published = True
+            except Exception as e:
+                print(f"Ошибка отправки: {e}")
+
+        await delete_message_safe(message)
+
+        if published:
+            await dm_user_safe(
+                message.author,
+                f"✅ Ваш пост опубликован в <#{target_id}> (тег `#{tag}`).",
+            )
+        else:
+            await dm_user_safe(
+                message.author,
+                "❌ Не удалось опубликовать пост. Проверьте права бота в целевом канале.",
+            )
+
+    await bot.process_commands(message)
+
+
+# ─────────────────────────────────────────────
+# Запуск
+# ─────────────────────────────────────────────
+if __name__ == "__main__":
+    bot.run(TOKEN)
