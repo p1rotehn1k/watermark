@@ -206,10 +206,9 @@ def _make_diagonal_tile(width: int, height: int) -> Image.Image:
         line_widths.append(bbox[2] - bbox[0])
         line_heights.append(bbox[3] - bbox[1])
 
-    print(f"[TILE] widths={line_widths}, heights={line_heights}", flush=True)
-
     line_height = max(line_heights) if line_heights else font_size
-    line_spacing = int(line_height * 1.3)
+    # Плотнее строки друг к другу — 1.15 вместо 1.3
+    line_spacing = int(line_height * 1.15)
     block_w = max(line_widths) if line_widths else 100
     block_h = line_spacing * len(WATERMARK_LINES)
 
@@ -220,35 +219,16 @@ def _make_diagonal_tile(width: int, height: int) -> Image.Image:
     tile = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
     tile_draw = ImageDraw.Draw(tile)
 
-    # Основной текст — белый, плотный
-    main_color = (*WATERMARK_COLOR, min(255, WATERMARK_OPACITY + 60))
-    # Обводка — чёрная, но в 2 раза прозрачнее
-    outline_color = (0, 0, 0, max(20, WATERMARK_OPACITY // 2))
+    # Только основной цвет, без обводки
+    main_color = (*WATERMARK_COLOR, WATERMARK_OPACITY)
 
     text_x = (tile_w - block_w) // 2
     text_y = (tile_h - block_h) // 2
-
-    # Толщина обводки — тонкая
-    outline_width = max(1, font_size // 30)
 
     for k, line in enumerate(WATERMARK_LINES):
         lw = line_widths[k]
         lx = text_x + (block_w - lw) // 2
         ly = text_y + k * line_spacing
-
-        # Обводка — только по 8 сторонам, без «заливки» вокруг
-        for dx in range(-outline_width, outline_width + 1):
-            for dy in range(-outline_width, outline_width + 1):
-                if dx == 0 and dy == 0:
-                    continue
-                tile_draw.text(
-                    (lx + dx, ly + dy),
-                    line,
-                    font=font,
-                    fill=outline_color,
-                )
-
-        # Белый текст поверх
         tile_draw.text((lx, ly), line, font=font, fill=main_color)
 
     bbox_after = tile.getbbox()
