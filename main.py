@@ -192,7 +192,7 @@ def load_font(size: int):
 def _make_diagonal_tile(width: int, height: int) -> Image.Image:
     font_size = max(14, int(min(width, height) * WATERMARK_FONT_SCALE))
     print(f"[TILE] img={width}x{height}, font_size={font_size}px, "
-          f"step={WATERMARK_STEP_X}x{WATERMARK_STEP_Y}, angle={WATERMARK_ANGLE}")
+          f"step={WATERMARK_STEP_X}x{WATERMARK_STEP_Y}, angle={WATERMARK_ANGLE}", flush=True)
 
     font = load_font(font_size)
 
@@ -206,7 +206,7 @@ def _make_diagonal_tile(width: int, height: int) -> Image.Image:
         line_widths.append(bbox[2] - bbox[0])
         line_heights.append(bbox[3] - bbox[1])
 
-    print(f"[TILE] widths={line_widths}, heights={line_heights}")
+    print(f"[TILE] widths={line_widths}, heights={line_heights}", flush=True)
 
     line_height = max(line_heights) if line_heights else font_size
     line_spacing = int(line_height * 1.3)
@@ -215,27 +215,50 @@ def _make_diagonal_tile(width: int, height: int) -> Image.Image:
 
     tile_w = max(WATERMARK_STEP_X, block_w + 60)
     tile_h = max(WATERMARK_STEP_Y, block_h + 60)
-    print(f"[TILE] tile={tile_w}x{tile_h}, block={block_w}x{block_h}")
+    print(f"[TILE] tile={tile_w}x{tile_h}, block={block_w}x{block_h}", flush=True)
 
     tile = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
     tile_draw = ImageDraw.Draw(tile)
-    color = (*WATERMARK_COLOR, WATERMARK_OPACITY)
+
+    # Основной текст — белый, плотный
+    main_color = (*WATERMARK_COLOR, min(255, WATERMARK_OPACITY + 60))
+    # Обводка — чёрная, но в 2 раза прозрачнее
+    outline_color = (0, 0, 0, max(20, WATERMARK_OPACITY // 2))
 
     text_x = (tile_w - block_w) // 2
     text_y = (tile_h - block_h) // 2
+
+    # Толщина обводки — тонкая
+    outline_width = max(1, font_size // 30)
+
     for k, line in enumerate(WATERMARK_LINES):
         lw = line_widths[k]
         lx = text_x + (block_w - lw) // 2
-        tile_draw.text(
-            (lx, text_y + k * line_spacing),
-            line,
-            font=font,
-            fill=color,
-        )
+        ly = text_y + k * line_spacing
+
+        # Обводка — только по 8 сторонам, без «заливки» вокруг
+        for dx in range(-outline_width, outline_width + 1):
+            for dy in range(-outline_width, outline_width + 1):
+                if dx == 0 and dy == 0:
+                    continue
+                tile_draw.text(
+                    (lx + dx, ly + dy),
+                    line,
+                    font=font,
+                    fill=outline_color,
+                )
+
+        # Белый текст поверх
+        tile_draw.text((lx, ly), line, font=font, fill=main_color)
+
+    bbox_after = tile.getbbox()
+    print(f"[TILE] bbox: {bbox_after}", flush=True)
+    if bbox_after is None:
+        raise RuntimeError("Тайл пуст — шрифт не рисует текст")
 
     tile = tile.rotate(WATERMARK_ANGLE, resample=Image.BICUBIC, expand=True)
     tw, th = tile.size
-    print(f"[TILE] after rotate: {tw}x{th}")
+    print(f"[TILE] after rotate: {tw}x{th}", flush=True)
 
     if tw == 0 or th == 0:
         raise RuntimeError(f"Тайл нулевого размера: {tw}x{th}")
@@ -246,10 +269,9 @@ def _make_diagonal_tile(width: int, height: int) -> Image.Image:
         for x in range(-tw, width + tw, tw):
             canvas.paste(tile, (x, y), tile)
             count += 1
-    print(f"[TILE] наложено: {count} тайлов")
+    print(f"[TILE] наложено: {count} тайлов", flush=True)
 
     return canvas
-
 
 # ─────────────────────────────────────────────
 # Бейдж
