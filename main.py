@@ -144,28 +144,21 @@ hint_message_id = None
 # ─────────────────────────────────────────────
 def load_font(size: int):
     fonts = [
+        os.path.join(BASE_DIR, "arialbd.ttf"),   # свой шрифт из проекта
+        os.path.join(BASE_DIR, "fonts", "arialbd.ttf"),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf",
         "arialbd.ttf",
         "arial.ttf",
-        "Arial.ttf",
-        "DejaVuSans-Bold.ttf",
-        "DejaVuSans.ttf",
         "C:\\Windows\\Fonts\\arialbd.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-        "/Library/Fonts/Arial Bold.ttf",
     ]
     for path in fonts:
         try:
-            f = ImageFont.truetype(path, size)
-            return f
+            return ImageFont.truetype(path, size)
         except (IOError, OSError):
             continue
-
-    print("[FONT] ⚠️ Ни один TTF-шрифт не найден, использую дефолтный (текст будет маленьким)")
+    print("[FONT] ⚠️ Шрифт не найден, использую дефолтный")
     return ImageFont.load_default()
 
 
