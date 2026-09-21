@@ -975,11 +975,6 @@ async def on_ready():
             for cmd in synced:
                 print(f"  /{cmd.name} — {cmd.description}", flush=True)
 
-            # 4. Глобальные команды — удаляем их один раз, чтобы не было дублей
-            bot.tree.clear_commands(guild=None)
-            await bot.tree.sync()
-            print("Глобальные команды очищены (синхронизируются только на сервере).", flush=True)
-
         else:
             synced = await bot.tree.sync()
             print(f"Синхронизировано {len(synced)} слэш-команд глобально.", flush=True)
