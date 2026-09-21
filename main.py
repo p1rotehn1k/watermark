@@ -885,7 +885,7 @@ def build_hint_embed() -> discord.Embed:
             f"{tags_line}\n"
             f"**3.** Отправьте — бот опубликует пост в нужный канал\n\n"
             f"**Пример:**\n"
-            f"```\n# ахтуба\nТочка 123:123\nНа что было поймано\nВаши скрины до 5 шт\n```"
+            f"```\n# ахтуба\nТочка 123:123\nклипса\nНа что было поймано\nВаши скрины до 5 шт\n```"
         )
     embed = discord.Embed(title=HINT_TITLE, description=body, color=discord.Color.blue())
     if HINT_FOOTER:
