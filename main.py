@@ -713,23 +713,39 @@ async def top_command(interaction: discord.Interaction, period: str = "month"):
 
     if interaction.user.id not in OWNER_IDS:
         await interaction.response.send_message(
-            "❌ У вас нет доступа к этой команде!",
+            "❌ Эта команда доступна только владельцу.",
             ephemeral=True,
         )
         return
 
+    # Подтверждаем сразу
+    await interaction.response.defer(ephemeral=True)
+
     period = (period or "month").strip()
-    # Проверяем, что значение валидное
     if not (period in ("month", "week", "all") or re.match(r"^\d{4}-\d{2}$", period)):
         period = "month"
 
-    embed = build_top_embed(period)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    try:
+        embed = build_top_embed(period)
+    except Exception as e:
+        print(f"[TOP] Ошибка БД: {e}", flush=True)
+        await interaction.followup.send("❌ Ошибка при чтении базы.", ephemeral=True)
+        return
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="mystats", description="Ваша статистика публикаций")
 async def mystats_command(interaction: discord.Interaction):
-    month_count, total_count, rank = get_user_stats(interaction.user.id)
+    # Мгновенно подтверждаем — Discord больше не ждёт
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        month_count, total_count, rank = get_user_stats(interaction.user.id)
+    except Exception as e:
+        print(f"[MYSTATS] Ошибка БД: {e}", flush=True)
+        await interaction.followup.send("❌ Ошибка при чтении базы.", ephemeral=True)
+        return
 
     now = datetime.now(timezone.utc)
     month_name = RU_MONTHS[now.month]
@@ -741,19 +757,22 @@ async def mystats_command(interaction: discord.Interaction):
     embed.add_field(name=f"За {month_name}", value=f"**{month_count}** постов", inline=True)
     embed.add_field(name="Всего", value=f"**{total_count}** постов", inline=True)
     if rank:
-        embed.add_field(name="Место за месяц", value=f"**#{rank}**", inline=True)
+        embed.add_field(name="Место в месяце", value=f"**#{rank}**", inline=True)
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="testdb", description="Показать всё содержимое БД (только для владельца)")
 async def testdb_command(interaction: discord.Interaction):
-    if OWNER_USER_ID is None or interaction.user.id != OWNER_USER_ID:
+    if not OWNER_IDS or interaction.user.id not in OWNER_IDS:
         await interaction.response.send_message("❌ Только для владельца.", ephemeral=True)
         return
 
+    # Подтверждаем сразу
+    await interaction.response.defer(ephemeral=True)
+
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         cur = conn.cursor()
 
         cur.execute("SELECT COUNT(*) FROM posts")
@@ -782,13 +801,13 @@ async def testdb_command(interaction: discord.Interaction):
         else:
             text += "_База пуста._"
 
-        # Если текст длинный — режем на части
         if len(text) > 1900:
             text = text[:1900] + "..."
 
-        await interaction.response.send_message(text, ephemeral=True)
+        await interaction.followup.send(text, ephemeral=True)
     except Exception as e:
-        await interaction.response.send_message(f"❌ Ошибка БД: {e}", ephemeral=True)
+        print(f"[TESTDB] Ошибка БД: {e}", flush=True)
+        await interaction.followup.send(f"❌ Ошибка БД: {e}", ephemeral=True)
 
 
 # ─────────────────────────────────────────────
