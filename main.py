@@ -1077,11 +1077,6 @@ async def on_message(message: discord.Message):
             print(f"[MSG] Это подсказка, пропускаю", flush=True)
             return
 
-        if OWNER_IDS and message.author.id not in OWNER_IDS:
-            print(f"[MSG] Автор не владелец, пропускаю", flush=True)
-            await bot.process_commands(message)
-            return
-
         tag = find_tag(message.content, message)
         print(f"[MSG] Найден тег: {tag}", flush=True)
 
