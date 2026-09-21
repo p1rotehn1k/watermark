@@ -129,6 +129,7 @@ MEMBER_ROLE_ID = _to_int(os.getenv("MEMBER_ROLE_ID", ""))
 # ─── Каналы ───
 VERIFY_CHANNEL_ID = _to_int(os.getenv("VERIFY_CHANNEL_ID", ""))
 LOG_CHANNEL_ID = _to_int(os.getenv("LOG_CHANNEL_ID", ""))
+TOP_CHANNEL_ID = _to_int(os.getenv("TOP_CHANNEL_ID", ""))
 
 # ─── Тексты ───
 HINT_TITLE = os.getenv("HINT_TITLE", "📸 Как опубликовать пост")
@@ -169,6 +170,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 verify_message_id = None
 hint_message_id = None
+top_hint_message_id = None
+bot_ready_done = False
 
 image_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -218,7 +221,7 @@ def record_post(user_id: int, username: str, tag: str):
         total = cur.fetchone()[0]
         conn.close()
 
-        print(f"[DB] ✅ ЗАПИСАН ПОСТ: {username} (user_id={user_id}, tag=#{tag}). Всего в базе: {total}", flush=True)
+        print(f"[DB] ✅ Пост от {username} → всего {total}", flush=True)
     except Exception as e:
         import traceback
         print(f"[DB] ❌ Ошибка записи: {e}", flush=True)
@@ -282,7 +285,6 @@ def get_top(period: str = "month", limit: int = 15):
     )
     rows = cur.fetchall()
     conn.close()
-    print(f"[DB] get_top({period}): найдено {len(rows)} пользователей", flush=True)
     return rows, start, end, title_suffix
 
 
@@ -560,6 +562,24 @@ def strip_tag(text: str, tag: str) -> str:
     lines = [ln.rstrip() for ln in cleaned.split("\n")]
     return "\n".join(lines).strip()
 
+async def safe_pin(msg: discord.Message):
+    try:
+        if msg.pinned:
+            return
+        await msg.pin(reason="Подсказка")
+        await asyncio.sleep(1.5)
+    except discord.HTTPException as e:
+        if e.status == 429:
+            print(f"[PIN] Rate limit, жду 5 секунд...", flush=True)
+            await asyncio.sleep(5)
+            try:
+                await msg.pin(reason="Подсказка (retry)")
+            except Exception as e2:
+                print(f"[PIN] Повторная ошибка: {e2}", flush=True)
+        else:
+            print(f"[PIN] HTTP ошибка: {e}", flush=True)
+    except Exception as e:
+        print(f"[PIN] {e}", flush=True)
 
 async def delete_message_safe(message: discord.Message):
     try:
@@ -599,7 +619,7 @@ async def process_and_publish(
 
     date_str = datetime.now().strftime("%d.%m.%Y")
     files = []
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     for idx, att in enumerate(attachments, start=1):
         try:
@@ -638,10 +658,9 @@ async def process_and_publish(
 
     # ⬇⬇⬇ ЗАПИСЬ В БД
     if published:
-        print(f"[PUBLISH] ✅ Пост опубликован, записываю в БД...", flush=True)
         record_post(author.id, author.display_name, tag)
     else:
-        print(f"[PUBLISH] ❌ Пост НЕ опубликован, БД не трогаю", flush=True)
+        print(f"[PUBLISH] ❌ Не опубликован (тег #{tag})", flush=True)
 
     return published
 
@@ -737,7 +756,6 @@ async def top_command(interaction: discord.Interaction, period: str = "month"):
 
 @bot.tree.command(name="mystats", description="Ваша статистика публикаций")
 async def mystats_command(interaction: discord.Interaction):
-    # Мгновенно подтверждаем — Discord больше не ждёт
     await interaction.response.defer(ephemeral=True)
 
     try:
@@ -791,8 +809,7 @@ async def testdb_command(interaction: discord.Interaction):
         top_rows = cur.fetchall()
         conn.close()
 
-        text = f"🗄️ Файл: `{DB_PATH}`\n"
-        text += f"Всего постов: **{total}**\n"
+        text = f"Всего постов: **{total}**\n"
         text += f"Уникальных пользователей: **{users}**\n\n"
         if top_rows:
             text += "**Топ-10 по всей базе:**\n"
@@ -873,6 +890,40 @@ async def find_hint_message(channel: discord.TextChannel):
         print(f"[HINT] {e}", flush=True)
     return None
 
+async def find_top_hint(channel: discord.TextChannel):
+    try:
+        async for msg in channel.history(limit=50):
+            if msg.author == bot.user and msg.embeds:
+                for emb in msg.embeds:
+                    if emb.title == "🏆 Топ":
+                        return msg
+    except Exception as e:
+        print(f"[TOP-HINT] {e}", flush=True)
+    return None
+
+
+def build_top_hint_embed() -> discord.Embed:
+    return discord.Embed(
+        title="🏆 Топ",
+        description=(
+            "📊 `/mystats` — Ваша статистика публикаций"
+        ),
+        color=discord.Color.gold(),
+    )
+
+
+async def publish_top_hint(channel: discord.TextChannel):
+    try:
+        msg = await channel.send(embed=build_top_hint_embed())
+        try:
+            await msg.pin(reason="Подсказка по командам")
+        except Exception:
+            pass
+        print("✅ Подсказка топа опубликована.", flush=True)
+        return msg
+    except Exception as e:
+        print(f"[TOP-HINT] {e}", flush=True)
+        return None
 
 def build_hint_embed() -> discord.Embed:
     if HINT_TEXT:
@@ -885,7 +936,7 @@ def build_hint_embed() -> discord.Embed:
             f"{tags_line}\n"
             f"**3.** Отправьте — бот опубликует пост в нужный канал\n\n"
             f"**Пример:**\n"
-            f"```\n# ахтуба\nТочка 123:123\nклипса\nНа что было поймано\nВаши скрины до 5 шт\n```"
+            f"```\n# ахтуба\nТочка 84:108\nклипса 17\nНа что было поймано\nВаши скрины до 5 шт\n```"
         )
     embed = discord.Embed(title=HINT_TITLE, description=body, color=discord.Color.blue())
     if HINT_FOOTER:
@@ -934,11 +985,84 @@ async def purge_source_channel(keep_ids=None):
 # ─────────────────────────────────────────────
 @tasks.loop(minutes=5)
 async def auto_clean():
-    if hint_message_id:
-        await purge_source_channel(keep_ids={hint_message_id})
-    else:
-        await purge_source_channel()
-    await purge_verify_channel(keep_id=verify_message_id)
+    global hint_message_id, top_hint_message_id, verify_message_id
+
+    # ─── Source-канал ───
+    if SOURCE_CHANNEL_ID:
+        src = bot.get_channel(SOURCE_CHANNEL_ID)
+        if src:
+            exists = False
+            if hint_message_id:
+                try:
+                    await src.fetch_message(hint_message_id)
+                    exists = True
+                except (discord.NotFound, discord.Forbidden):
+                    exists = False
+
+            if not exists:
+                print("[AUTO] Подсказка в source-канале пропала — восстанавливаю.", flush=True)
+                msg = await publish_hint(src)
+                if msg:
+                    hint_message_id = msg.id
+
+            # Чистим мусор
+            if hint_message_id:
+                await purge_source_channel(keep_ids={hint_message_id})
+            else:
+                await purge_source_channel()
+
+    # ─── Канал топа ───
+    if TOP_CHANNEL_ID:
+        top_ch = bot.get_channel(TOP_CHANNEL_ID)
+        if top_ch:
+            exists = False
+            if top_hint_message_id:
+                try:
+                    await top_ch.fetch_message(top_hint_message_id)
+                    exists = True
+                except (discord.NotFound, discord.Forbidden):
+                    exists = False
+
+            if not exists:
+                print("[AUTO] Подсказка в канале топа пропала — восстанавливаю.", flush=True)
+                msg = await publish_top_hint(top_ch)
+                if msg:
+                    top_hint_message_id = msg.id
+
+            # Чистим мусор
+            keep = {top_hint_message_id} if top_hint_message_id else set()
+            try:
+                async for msg in top_ch.history(limit=100):
+                    if msg.id in keep or msg.pinned:
+                        continue
+                    try:
+                        await msg.delete()
+                    except discord.Forbidden:
+                        break
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[PURGE top] {e}", flush=True)
+
+    # ─── Канал верификации ───
+    if VERIFY_CHANNEL_ID:
+        ch = bot.get_channel(VERIFY_CHANNEL_ID)
+        if ch:
+            exists = False
+            if verify_message_id:
+                try:
+                    await ch.fetch_message(verify_message_id)
+                    exists = True
+                except (discord.NotFound, discord.Forbidden):
+                    exists = False
+
+            if not exists:
+                print("[AUTO] Кнопка верификации пропала — восстанавливаю.", flush=True)
+                msg = await publish_verify_button(ch)
+                if msg:
+                    verify_message_id = msg.id
+
+            await purge_verify_channel(keep_id=verify_message_id)
 
 
 @auto_clean.before_loop
@@ -951,52 +1075,70 @@ async def before_auto_clean():
 # ─────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    global verify_message_id, hint_message_id
+    global verify_message_id, hint_message_id, top_hint_message_id, bot_ready_done
+
+    # Защита от повторного запуска при реконнекте
+    if bot_ready_done:
+        print("[READY] Повторный реконнект — инициализацию пропускаю.", flush=True)
+        return
+    bot_ready_done = True
 
     init_db()
     print(f"Бот {bot.user} готов к работе!", flush=True)
 
     bot.add_view(VerifyView())
 
+    # ─── Синхронизация слэш-команд ───
     try:
         if GUILD_ID:
             guild = discord.Object(id=GUILD_ID)
-
-            # 1. Сначала очищаем старые ГИЛЬДЕЙСКИЕ команды
             bot.tree.clear_commands(guild=guild)
-
-            # 2. Копируем команды из декораторов (глобальные) в гильдейский список
             bot.tree.copy_global_to(guild=guild)
-
-            # 3. Синхронизируем ТОЛЬКО гильдейские — глобальные не трогаем
             synced = await bot.tree.sync(guild=guild)
-
             print(f"Синхронизировано {len(synced)} слэш-команд на сервере {GUILD_ID}.", flush=True)
             for cmd in synced:
                 print(f"  /{cmd.name} — {cmd.description}", flush=True)
-
         else:
             synced = await bot.tree.sync()
             print(f"Синхронизировано {len(synced)} слэш-команд глобально.", flush=True)
     except Exception as e:
         print(f"Ошибка синхронизации: {e}", flush=True)
 
+    await asyncio.sleep(2)  # пауза, чтобы не долбить Discord
+
+    # ─── Подсказка в source-канале ───
     if SOURCE_CHANNEL_ID:
         src = bot.get_channel(SOURCE_CHANNEL_ID)
         if src:
             existing = await find_hint_message(src)
             if existing:
                 hint_message_id = existing.id
-                if not existing.pinned:
-                    try:
-                        await existing.pin(reason="Перезакрепление")
-                    except Exception:
-                        pass
+                await safe_pin(existing)
             else:
                 msg = await publish_hint(src)
                 if msg:
                     hint_message_id = msg.id
 
+    await asyncio.sleep(2)
+
+    # ─── Подсказка в канале топа ───
+    if TOP_CHANNEL_ID:
+        top_ch = bot.get_channel(TOP_CHANNEL_ID)
+        if top_ch:
+            existing = await find_top_hint(top_ch)
+            if existing:
+                top_hint_message_id = existing.id
+                await safe_pin(existing)
+            else:
+                msg = await publish_top_hint(top_ch)
+                if msg:
+                    top_hint_message_id = msg.id
+        else:
+            print(f"❌ Канал топа {TOP_CHANNEL_ID} не найден.", flush=True)
+
+    await asyncio.sleep(2)
+
+    # ─── Верификация ───
     if VERIFY_CHANNEL_ID:
         channel = bot.get_channel(VERIFY_CHANNEL_ID)
         if channel:
@@ -1009,6 +1151,7 @@ async def on_ready():
                     verify_message_id = msg.id
             await purge_verify_channel(keep_id=verify_message_id)
 
+    # ─── Автоочистка ───
     if not auto_clean.is_running():
         auto_clean.start()
         print("Автоочистка запущена.", flush=True)
@@ -1061,21 +1204,17 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # ⬇ ОТЛАДКА — видим каждое сообщение
-    print(f"[MSG] Канал {message.channel.id} | Автор: {message.author} (id={message.author.id}) | "
-          f"Текст: {message.content!r} | Вложений: {len(message.attachments)}", flush=True)
-
     if SOURCE_CHANNEL_ID and message.channel.id == SOURCE_CHANNEL_ID:
-        print(f"[MSG] ← Это source-канал!", flush=True)
+        # Логируем только факт обработки, без текста
+        # print(f"[MSG] {message.author} | вложений: {len(message.attachments)}", flush=True)
 
         if hint_message_id and message.id == hint_message_id:
-            print(f"[MSG] Это подсказка, пропускаю", flush=True)
             return
 
         tag = find_tag(message.content, message)
-        print(f"[MSG] Найден тег: {tag}", flush=True)
 
         if tag is None:
+            print(f"[MSG] ⚠️ Тег не найден от {message.author}", flush=True)
             await delete_message_safe(message)
             tags_line = "\n".join(f"• `#{t}` → <#{cid}>" for t, cid in TAG_MAP.items())
             embed = discord.Embed(
@@ -1090,9 +1229,9 @@ async def on_message(message: discord.Message):
             a for a in message.attachments
             if a.content_type and a.content_type.startswith("image/")
         ]
-        print(f"[MSG] Картинок: {len(image_attachments)}", flush=True)
 
         if not image_attachments:
+            print(f"[MSG] ⚠️ Нет картинок от {message.author}", flush=True)
             await delete_message_safe(message)
             first_tag = list(TAG_MAP.keys())[0] if TAG_MAP else "тег"
             embed = discord.Embed(
@@ -1105,7 +1244,6 @@ async def on_message(message: discord.Message):
 
         post_text = strip_tag(message.content, tag) or f"Улов от {message.author.display_name}"
 
-        print(f"[MSG] Вызываю process_and_publish...", flush=True)
         ok = await process_and_publish(
             source_channel=message.channel,
             target_id=TAG_MAP[tag],
@@ -1114,7 +1252,6 @@ async def on_message(message: discord.Message):
             text=post_text,
             tag=tag,
         )
-        print(f"[MSG] process_and_publish вернул: {ok}", flush=True)
 
         await delete_message_safe(message)
 

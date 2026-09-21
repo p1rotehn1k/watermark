@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 stats.db
+backup.py
