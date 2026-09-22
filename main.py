@@ -775,7 +775,7 @@ async def mystats_command(interaction: discord.Interaction):
     embed.add_field(name=f"За {month_name}", value=f"**{month_count}** постов", inline=True)
     embed.add_field(name="Всего", value=f"**{total_count}** постов", inline=True)
     if rank:
-        embed.add_field(name="Место в месяце", value=f"**#{rank}**", inline=True)
+        embed.add_field(name="Место за месяц", value=f"**#{rank}**", inline=True)
 
     await interaction.followup.send(embed=embed, ephemeral=True)
 
