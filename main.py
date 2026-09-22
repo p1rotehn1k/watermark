@@ -239,7 +239,7 @@ RU_MONTHS_GENITIVE = {
     9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
 }
 
-def get_top(period: str = "month", limit: int = 15):
+def get_top(period: str = "month", limit: int = 5):
     """
     period: 'month' | 'week' | 'all' | 'YYYY-MM'
     Возвращает (rows, start, end, title_suffix)
@@ -906,7 +906,9 @@ def build_top_hint_embed() -> discord.Embed:
     return discord.Embed(
         title="🏆 Топ",
         description=(
-            "📊 `/mystats` — Ваша статистика публикаций"
+            "📊 `/mystats` — Ваша статистика публикаций\n"
+            "📊 `/top` — Выводит первые 5 мест(Уберу ее с подсказки т.к. команда будет только у тебя)\n"
+            "📊 `/testdb` — Команда для отладки (Видишь только ты и я тоже не будет в подсказке)"
         ),
         color=discord.Color.gold(),
     )
