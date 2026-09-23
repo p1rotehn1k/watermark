@@ -627,7 +627,7 @@ async def process_and_publish(
         await notify_channel_safe(source_channel, text="❌ Не удалось обработать изображения.")
         return False
 
-    MAX_FILES = 10
+    MAX_FILES = 5
     published = False
     for i in range(0, len(files), MAX_FILES):
         chunk = files[i:i + MAX_FILES]
@@ -1040,6 +1040,21 @@ async def on_message(message: discord.Message):
             embed = discord.Embed(
                 title="❌ Нет картинок",
                 description=f"Пример: `#{first_tag}` + файл.",
+                color=discord.Color.orange(),
+            )
+            await notify_channel_safe(message.channel, embed=embed)
+            return
+
+        # ─── Проверка: максимум 5 скринов ───
+        if len(image_attachments) > 5:
+            print(f"[MSG] ⚠️ Слишком много картинок от {message.author}: {len(image_attachments)}", flush=True)
+            await delete_message_safe(message)
+            embed = discord.Embed(
+                title="❌ Слишком много скринов",
+                description=(
+                    f"Вы прикрепили **{len(image_attachments)}** картинок.\n"
+                    f"Максимум — **5** в одном сообщении.\n\n"
+                ),
                 color=discord.Color.orange(),
             )
             await notify_channel_safe(message.channel, embed=embed)
