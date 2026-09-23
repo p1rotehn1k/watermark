@@ -1045,7 +1045,6 @@ async def on_message(message: discord.Message):
             await notify_channel_safe(message.channel, embed=embed)
             return
 
-        # ─── Проверка: максимум 5 скринов ───
         if len(image_attachments) > 5:
             print(f"[MSG] ⚠️ Слишком много картинок от {message.author}: {len(image_attachments)}", flush=True)
             await delete_message_safe(message)
