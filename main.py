@@ -1,7 +1,6 @@
 import os
 import io
 import re
-import math
 import asyncio
 import sqlite3
 from pathlib import Path
@@ -11,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
 
@@ -121,14 +119,7 @@ BADGE_OPACITY = _env_int("BADGE_OPACITY", 130)
 BADGE_TEXT = os.getenv("BADGE_TEXT", "")
 BADGE_TEXT_COLOR = _env_color("BADGE_TEXT_COLOR", (255, 255, 255))
 
-# ─── Роли ───
-JOIN_ROLE_ID = _to_int(os.getenv("JOIN_ROLE_ID", ""))
-UNVERIFIED_ROLE_ID = _to_int(os.getenv("UNVERIFIED_ROLE_ID", ""))
-MEMBER_ROLE_ID = _to_int(os.getenv("MEMBER_ROLE_ID", ""))
-
 # ─── Каналы ───
-VERIFY_CHANNEL_ID = _to_int(os.getenv("VERIFY_CHANNEL_ID", ""))
-LOG_CHANNEL_ID = _to_int(os.getenv("LOG_CHANNEL_ID", ""))
 TOP_CHANNEL_ID = _to_int(os.getenv("TOP_CHANNEL_ID", ""))
 
 # ─── Тексты ───
@@ -136,18 +127,10 @@ HINT_TITLE = os.getenv("HINT_TITLE", "📸 Как опубликовать по�
 HINT_FOOTER = os.getenv("HINT_FOOTER", "Сообщения без тега удаляются автоматически")
 HINT_TEXT = os.getenv("HINT_TEXT", "").strip()
 
-VERIFY_TITLE = os.getenv("VERIFY_TITLE", "Верификация")
-VERIFY_DESCRIPTION = os.getenv(
-    "VERIFY_DESCRIPTION",
-    "Нажмите кнопку ниже, чтобы получить доступ к серверу.",
-)
-VERIFY_BUTTON_LABEL = os.getenv("VERIFY_BUTTON_LABEL", "✅ Верифицироваться")
-
 # ─── Отладка ───
 print("=" * 50, flush=True)
 print("DB_PATH              =", DB_PATH, flush=True)
 print("SOURCE_CHANNEL_ID    =", SOURCE_CHANNEL_ID, flush=True)
-print("VERIFY_CHANNEL_ID    =", VERIFY_CHANNEL_ID, flush=True)
 print("GUILD_ID             =", GUILD_ID, flush=True)
 print("OWNER_IDS            =", OWNER_IDS, flush=True)
 print("TAG_MAP:", flush=True)
@@ -168,7 +151,6 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-verify_message_id = None
 hint_message_id = None
 top_hint_message_id = None
 bot_ready_done = False
@@ -666,57 +648,6 @@ async def process_and_publish(
 
 
 # ─────────────────────────────────────────────
-# Кнопка верификации
-# ─────────────────────────────────────────────
-class VerifyView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(
-        label=VERIFY_BUTTON_LABEL,
-        style=discord.ButtonStyle.green,
-        custom_id="verify_button",
-    )
-    async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        member = interaction.user
-
-        if not MEMBER_ROLE_ID:
-            await interaction.response.send_message("❌ Роль Member не настроена.", ephemeral=True)
-            return
-
-        member_role = guild.get_role(MEMBER_ROLE_ID)
-        if member_role is None:
-            await interaction.response.send_message("❌ Роль не найдена.", ephemeral=True)
-            return
-
-        if member_role in member.roles:
-            await interaction.response.send_message("ℹ️ Вы уже верифицированы.", ephemeral=True)
-            return
-
-        try:
-            if UNVERIFIED_ROLE_ID:
-                unverified = guild.get_role(UNVERIFIED_ROLE_ID)
-                if unverified and unverified in member.roles:
-                    await member.remove_roles(unverified, reason="Прошёл верификацию")
-            await member.add_roles(member_role, reason="Прошёл верификацию")
-            await interaction.response.send_message(
-                "✅ Готово! Добро пожаловать на сервер.", ephemeral=True
-            )
-            if LOG_CHANNEL_ID:
-                log = bot.get_channel(LOG_CHANNEL_ID)
-                if log:
-                    try:
-                        await log.send(f"✅ {member.mention} прошёл верификацию.")
-                    except Exception:
-                        pass
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "❌ У бота нет прав на выдачу роли.", ephemeral=True
-            )
-
-
-# ─────────────────────────────────────────────
 # Слэш-команды
 # ─────────────────────────────────────────────
 @bot.tree.command(name="top", description="Топ публикующих (только для владельца)")
@@ -827,58 +758,6 @@ async def testdb_command(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ Ошибка БД: {e}", ephemeral=True)
 
 
-# ─────────────────────────────────────────────
-# Обслуживание канала верификации + подсказка
-# ─────────────────────────────────────────────
-async def find_button_message(channel: discord.TextChannel):
-    try:
-        async for msg in channel.history(limit=50):
-            if msg.author == bot.user and msg.components:
-                return msg
-    except Exception as e:
-        print(f"[VERIFY] {e}", flush=True)
-    return None
-
-
-async def publish_verify_button(channel: discord.TextChannel):
-    embed = discord.Embed(
-        title=VERIFY_TITLE,
-        description=VERIFY_DESCRIPTION,
-        color=discord.Color.green(),
-    )
-    embed.add_field(
-        name="Что делать?",
-        value=f"Нажмите кнопку **{VERIFY_BUTTON_LABEL}** ниже.",
-        inline=False,
-    )
-    try:
-        msg = await channel.send(embed=embed, view=VerifyView())
-        return msg
-    except Exception as e:
-        print(f"[VERIFY] {e}", flush=True)
-        return None
-
-
-async def purge_verify_channel(keep_id=None):
-    if not VERIFY_CHANNEL_ID:
-        return
-    channel = bot.get_channel(VERIFY_CHANNEL_ID)
-    if channel is None:
-        return
-    try:
-        async for msg in channel.history(limit=200):
-            if keep_id and msg.id == keep_id:
-                continue
-            try:
-                await msg.delete()
-            except discord.Forbidden:
-                return
-            except Exception:
-                pass
-    except Exception as e:
-        print(f"[PURGE verify] {e}", flush=True)
-
-
 async def find_hint_message(channel: discord.TextChannel):
     try:
         async for msg in channel.history(limit=50):
@@ -906,9 +785,7 @@ def build_top_hint_embed() -> discord.Embed:
     return discord.Embed(
         title="🏆 Топ",
         description=(
-            "📊 `/mystats` — Ваша статистика публикаций\n"
-            "📊 `/top` — Выводит первые 5 мест(Уберу ее с подсказки т.к. команда будет только у тебя)\n"
-            "📊 `/testdb` — Команда для отладки (Видишь только ты и я, тоже не будет в подсказке)"
+            "📊 `/mystats` — Ваша статистика публикаций"
         ),
         color=discord.Color.gold(),
     )
@@ -938,7 +815,7 @@ def build_hint_embed() -> discord.Embed:
             f"{tags_line}\n"
             f"**3.** Отправьте — бот опубликует пост в нужный канал\n\n"
             f"**Пример:**\n"
-            f"```\n# ахтуба\nТочка 84:108\nклипса 17\nНа что было поймано\nВаши скрины до 5 шт\n```"
+            f"```\n#ахтуба-троф\nНик в игре\nТочка 84:108\nклипса 17(заглубление на махи/матчи)\nНа что было поймано\nВаши скрины до 5 шт\n```"
         )
     embed = discord.Embed(title=HINT_TITLE, description=body, color=discord.Color.blue())
     if HINT_FOOTER:
@@ -987,7 +864,7 @@ async def purge_source_channel(keep_ids=None):
 # ─────────────────────────────────────────────
 @tasks.loop(minutes=5)
 async def auto_clean():
-    global hint_message_id, top_hint_message_id, verify_message_id
+    global hint_message_id, top_hint_message_id
 
     # ─── Source-канал ───
     if SOURCE_CHANNEL_ID:
@@ -1046,26 +923,6 @@ async def auto_clean():
             except Exception as e:
                 print(f"[PURGE top] {e}", flush=True)
 
-    # ─── Канал верификации ───
-    if VERIFY_CHANNEL_ID:
-        ch = bot.get_channel(VERIFY_CHANNEL_ID)
-        if ch:
-            exists = False
-            if verify_message_id:
-                try:
-                    await ch.fetch_message(verify_message_id)
-                    exists = True
-                except (discord.NotFound, discord.Forbidden):
-                    exists = False
-
-            if not exists:
-                print("[AUTO] Кнопка верификации пропала — восстанавливаю.", flush=True)
-                msg = await publish_verify_button(ch)
-                if msg:
-                    verify_message_id = msg.id
-
-            await purge_verify_channel(keep_id=verify_message_id)
-
 
 @auto_clean.before_loop
 async def before_auto_clean():
@@ -1077,8 +934,8 @@ async def before_auto_clean():
 # ─────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    global verify_message_id, hint_message_id, top_hint_message_id, bot_ready_done
 
+    global hint_message_id, top_hint_message_id, bot_ready_done
     # Защита от повторного запуска при реконнекте
     if bot_ready_done:
         print("[READY] Повторный реконнект — инициализацию пропускаю.", flush=True)
@@ -1087,8 +944,6 @@ async def on_ready():
 
     init_db()
     print(f"Бот {bot.user} готов к работе!", flush=True)
-
-    bot.add_view(VerifyView())
 
     # ─── Синхронизация слэш-команд ───
     try:
@@ -1140,65 +995,11 @@ async def on_ready():
 
     await asyncio.sleep(2)
 
-    # ─── Верификация ───
-    if VERIFY_CHANNEL_ID:
-        channel = bot.get_channel(VERIFY_CHANNEL_ID)
-        if channel:
-            existing = await find_button_message(channel)
-            if existing:
-                verify_message_id = existing.id
-            else:
-                msg = await publish_verify_button(channel)
-                if msg:
-                    verify_message_id = msg.id
-            await purge_verify_channel(keep_id=verify_message_id)
-
     # ─── Автоочистка ───
     if not auto_clean.is_running():
         auto_clean.start()
         print("Автоочистка запущена.", flush=True)
 
-
-@bot.event
-async def on_member_join(member: discord.Member):
-    guild = member.guild
-    if JOIN_ROLE_ID:
-        role = guild.get_role(JOIN_ROLE_ID)
-        if role:
-            try:
-                await member.add_roles(role, reason="Автовыдача")
-            except discord.Forbidden:
-                pass
-    if UNVERIFIED_ROLE_ID:
-        role = guild.get_role(UNVERIFIED_ROLE_ID)
-        if role and role not in member.roles:
-            try:
-                await member.add_roles(role, reason="Новый участник")
-            except discord.Forbidden:
-                pass
-
-    try:
-        verify_channel = f"<#{VERIFY_CHANNEL_ID}>" if VERIFY_CHANNEL_ID else "#верификация"
-        source_channel = f"<#{SOURCE_CHANNEL_ID}>" if SOURCE_CHANNEL_ID else "#публикации"
-        tags_line = " · ".join(f"`#{t}`" for t in TAG_MAP.keys()) or "—"
-        embed = discord.Embed(
-            title=f"👋 Добро пожаловать, {member.display_name}!",
-            description=(
-                f"**1. Пройдите верификацию:** {verify_channel}\n"
-                f"**2. Публикуйте посты:** {source_channel}\n\n"
-                f"**Теги:** {tags_line}"
-            ),
-            color=discord.Color.green(),
-        )
-        await member.send(embed=embed)
-    except Exception:
-        pass
-
-    await purge_verify_channel(keep_id=verify_message_id)
-    if hint_message_id:
-        await purge_source_channel(keep_ids={hint_message_id})
-    else:
-        await purge_source_channel()
 
 
 @bot.event
