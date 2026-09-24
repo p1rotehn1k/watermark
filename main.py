@@ -638,7 +638,6 @@ async def process_and_publish(
         except Exception as e:
             print(f"Ошибка отправки: {e}", flush=True)
 
-    # ⬇⬇⬇ ЗАПИСЬ В БД
     if published:
         record_post(author.id, author.display_name, tag)
     else:
@@ -815,7 +814,13 @@ def build_hint_embed() -> discord.Embed:
             f"{tags_line}\n"
             f"**3.** Отправьте — бот опубликует пост в нужный канал\n\n"
             f"**Пример:**\n"
-            f"```\n#ахтуба-троф\nНик в игре\nТочка 84:108\nклипса 17(заглубление на махи/матчи)\nНа что было поймано\nВаши скрины до 5 шт\n```"
+            f"```\n#ахтуба-троф\n"
+            f"Ник в игре\n"
+            f"Точка 84:108\n"
+            f"клипса 17(заглубление на махи/матчи)\n"
+            f"скорость и тип проводки(для спининга)\n"
+            f"На что было поймано\n"
+            f"Ваши скрины до 5 шт\n```"
         )
     embed = discord.Embed(title=HINT_TITLE, description=body, color=discord.Color.blue())
     if HINT_FOOTER:
@@ -834,7 +839,6 @@ async def publish_hint(channel: discord.TextChannel):
     except Exception as e:
         print(f"[HINT] {e}", flush=True)
         return None
-
 
 async def purge_source_channel(keep_ids=None):
     if not SOURCE_CHANNEL_ID:
