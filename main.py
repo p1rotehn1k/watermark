@@ -165,6 +165,8 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("PRAGMA journal_mode=WAL")
+
+    # 1. Создаём таблицу, если её нет
     cur.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,13 +176,24 @@ def init_db():
             posted_at TEXT NOT NULL
         )
     """)
+
+    # 2. Миграция: добавляем колонку discord_message_id, если её нет
+    cur.execute("PRAGMA table_info(posts)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "discord_message_id" not in cols:
+        cur.execute("ALTER TABLE posts ADD COLUMN discord_message_id INTEGER")
+        print("[DB] ✅ Добавлена колонка discord_message_id", flush=True)
+
+    # 3. Только теперь создаём индексы — колонка точно есть
     cur.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON posts(user_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_posted_at ON posts(posted_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_message_id ON posts(discord_message_id)")
+
     conn.commit()
     conn.close()
     print(f"[DB] ✅ Инициализирована: {DB_PATH}", flush=True)
 
-    # Проверка: читается ли БД
+    # Проверка
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM posts")
@@ -189,13 +202,20 @@ def init_db():
     print(f"[DB] В базе сейчас постов: {cnt}", flush=True)
 
 
-def record_post(user_id: int, username: str, tag: str):
+def record_post(user_id: int, username: str, tag: str, discord_message_id: int = None):
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO posts (user_id, username, tag, posted_at) VALUES (?, ?, ?, ?)",
-            (user_id, username, tag, datetime.now(timezone.utc).isoformat()),
+            "INSERT INTO posts (user_id, username, tag, posted_at, discord_message_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                user_id,
+                username,
+                tag,
+                datetime.now(timezone.utc).isoformat(),
+                discord_message_id,
+            ),
         )
         conn.commit()
 
@@ -203,7 +223,7 @@ def record_post(user_id: int, username: str, tag: str):
         total = cur.fetchone()[0]
         conn.close()
 
-        print(f"[DB] ✅ Пост от {username} → всего {total}", flush=True)
+        print(f"[DB] ✅ Пост от {username} → всего {total} (msg={discord_message_id})", flush=True)
     except Exception as e:
         import traceback
         print(f"[DB] ❌ Ошибка записи: {e}", flush=True)
@@ -629,17 +649,21 @@ async def process_and_publish(
 
     MAX_FILES = 5
     published = False
+    sent_message_id = None
+
     for i in range(0, len(files), MAX_FILES):
         chunk = files[i:i + MAX_FILES]
         content = text if i == 0 else None
         try:
-            await target_channel.send(content=content, files=chunk)
+            sent = await target_channel.send(content=content, files=chunk)
+            if sent_message_id is None:
+                sent_message_id = sent.id
             published = True
         except Exception as e:
             print(f"Ошибка отправки: {e}", flush=True)
 
     if published:
-        record_post(author.id, author.display_name, tag)
+        record_post(author.id, author.display_name, tag, discord_message_id=sent_message_id)
     else:
         print(f"[PUBLISH] ❌ Не опубликован (тег #{tag})", flush=True)
 
@@ -809,17 +833,19 @@ def build_hint_embed() -> discord.Embed:
     else:
         tags_line = " · ".join(f"`#{t}`" for t in TAG_MAP.keys()) or "—"
         body = (
+            f"📌 **Посты, оформленные не по примеру, будут удалены.**\n\n"
             f"**1.** Прикрепите одну или несколько картинок\n"
             f"**2.** В тексте укажите **тег** из списка:\n"
-            f"{tags_line}\n"
-            f"**3.** Отправьте — бот опубликует пост в нужный канал\n\n"
+            f"{tags_line}\n\n"
+            f"**3.** Добавить описание как в **примере**(не менее 15 символов)\n"
+            f"**4. Отправьте — бот опубликует пост в нужный канал**\n"
             f"**Пример:**\n"
             f"```\n#ахтуба-троф\n"
             f"Ник в игре\n"
-            f"Точка 84:108\n"
+            f"Точка 84:108(можно на скрине)\n"
             f"клипса 17(заглубление на махи/матчи)\n"
             f"скорость и тип проводки(для спининга)\n"
-            f"На что было поймано\n"
+            f"На что было поймано(можно на скрине)\n"
             f"Ваши скрины до 5 шт\n```"
         )
     embed = discord.Embed(title=HINT_TITLE, description=body, color=discord.Color.blue())
@@ -1012,8 +1038,6 @@ async def on_message(message: discord.Message):
         return
 
     if SOURCE_CHANNEL_ID and message.channel.id == SOURCE_CHANNEL_ID:
-        # Логируем только факт обработки, без текста
-        # print(f"[MSG] {message.author} | вложений: {len(message.attachments)}", flush=True)
 
         if hint_message_id and message.id == hint_message_id:
             return
@@ -1042,8 +1066,11 @@ async def on_message(message: discord.Message):
             await delete_message_safe(message)
             first_tag = list(TAG_MAP.keys())[0] if TAG_MAP else "тег"
             embed = discord.Embed(
-                title="❌ Нет картинок",
-                description=f"Пример: `#{first_tag}` + файл.",
+                title="❌ Нет скринов",
+                description=(
+                    "Прикрепите **от 1 до 5 скринов** к сообщению"
+                    "и отправьте пост заново."
+                ),
                 color=discord.Color.orange(),
             )
             await notify_channel_safe(message.channel, embed=embed)
@@ -1063,7 +1090,30 @@ async def on_message(message: discord.Message):
             await notify_channel_safe(message.channel, embed=embed)
             return
 
-        post_text = strip_tag(message.content, tag) or f"Улов от {message.author.display_name}"
+        # Убираем тег из текста
+        post_text = strip_tag(message.content, tag)
+
+        # Проверка: должен быть текст поста, кроме тега
+        if not post_text or len(post_text.strip()) < 15:
+            print(f"[MSG] ⚠️ Пустой текст от {message.author}", flush=True)
+            await delete_message_safe(message)
+            embed = discord.Embed(
+                title="❌ Недостаточно символов",
+                description=(
+                    f"К сообщению нужно добавить **текст** с описанием улова(не менее 15 символов).\n\n"
+                    f"**Пример:**\n"
+                    f"```\n#ахтуба-троф\n"
+                    f"Ник в игре\n"
+                    f"Точка 84:108\n"
+                    f"клипса 17(заглубление на махи/матчи)\n"
+                    f"скорость и тип проводки(для спининга)\n"
+                    f"На что было поймано\n"
+                    f"Ваши скрины до 5 шт\n```"
+                ),
+                color=discord.Color.red(),
+            )
+            await notify_channel_safe(message.channel, embed=embed)
+            return
 
         ok = await process_and_publish(
             source_channel=message.channel,
@@ -1088,6 +1138,28 @@ async def on_message(message: discord.Message):
             )
 
     await bot.process_commands(message)
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    if message.author.id != bot.user.id:
+        return
+
+    # Проверяем, что это сообщение в одном из целевых каналов
+    if message.channel.id not in TAG_MAP.values():
+        return
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM posts WHERE discord_message_id = ?", (message.id,))
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+
+        if deleted:
+            print(f"[DELETE] ✅ Пост удалён из БД (msg_id={message.id}, канал={message.channel.id})", flush=True)
+    except Exception as e:
+        print(f"[DELETE] ❌ Ошибка БД: {e}", flush=True)
 
 
 # ─────────────────────────────────────────────
