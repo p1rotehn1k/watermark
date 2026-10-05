@@ -20,6 +20,7 @@ load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TOKEN = os.getenv("DISCORD_TOKEN")
+WEBHOOKS: dict[int, str] = {}
 
 
 def _to_int(value: str):
@@ -647,20 +648,45 @@ async def process_and_publish(
         await notify_channel_safe(source_channel, text="❌ Не удалось обработать изображения.")
         return False
 
-    MAX_FILES = 5
+    MAX_FILES = 7
     published = False
     sent_message_id = None
+    webhook_url = WEBHOOKS.get(target_id)
 
-    for i in range(0, len(files), MAX_FILES):
-        chunk = files[i:i + MAX_FILES]
-        content = text if i == 0 else None
+    if webhook_url:
         try:
-            sent = await target_channel.send(content=content, files=chunk)
-            if sent_message_id is None:
-                sent_message_id = sent.id
-            published = True
+            import aiohttp as _aiohttp
+            async with _aiohttp.ClientSession() as session:
+                webhook = discord.Webhook.from_url(webhook_url, session=session)
+                for i in range(0, len(files), MAX_FILES):
+                    chunk = files[i:i + MAX_FILES]
+                    content = text if i == 0 else None
+                    sent = await webhook.send(
+                        content=content,
+                        username=author.display_name,
+                        avatar_url=author.display_avatar.url,
+                        files=chunk,
+                        wait=True,  # ← важно, чтобы получить объект сообщения
+                    )
+                    if sent_message_id is None and sent is not None:
+                        sent_message_id = sent.id
+                    published = True
         except Exception as e:
-            print(f"Ошибка отправки: {e}", flush=True)
+            print(f"[WEBHOOK] Ошибка отправки: {e}", flush=True)
+            published = False
+    else:
+        # Fallback — обычная отправка ботом
+        print(f"[WEBHOOK] Нет вебхука для #{tag}, отправляю ботом", flush=True)
+        for i in range(0, len(files), MAX_FILES):
+            chunk = files[i:i + MAX_FILES]
+            content = text if i == 0 else None
+            try:
+                sent = await target_channel.send(content=content, files=chunk)
+                if sent_message_id is None:
+                    sent_message_id = sent.id
+                published = True
+            except Exception as e:
+                print(f"Ошибка отправки: {e}", flush=True)
 
     if published:
         record_post(author.id, author.display_name, tag, discord_message_id=sent_message_id)
@@ -836,7 +862,7 @@ def build_hint_embed() -> discord.Embed:
             f"📌 **Посты, оформленные не по примеру, будут удалены.**\n\n"
             f"**1.** Прикрепите одну или несколько картинок\n"
             f"**2.** В тексте укажите **тег** из списка:\n"
-            f"{tags_line}\n"
+            f"{tags_line}\n\n"
             f"**3.** Добавить описание как в **примере**(не менее 15 символов)\n"
             f"**4. Отправьте — бот опубликует пост в нужный канал**\n"
             f"**Пример:**\n"
@@ -846,7 +872,7 @@ def build_hint_embed() -> discord.Embed:
             f"клипса 17(заглубление на махи/матчи)\n"
             f"скорость и тип проводки(для спининга)\n"
             f"На что было поймано(можно на скрине)\n"
-            f"Ваши скрины до 5 шт\n```"
+            f"Ваши скрины до 7 шт\n```"
         )
     embed = discord.Embed(title=HINT_TITLE, description=body, color=discord.Color.blue())
     if HINT_FOOTER:
@@ -888,6 +914,27 @@ async def purge_source_channel(keep_ids=None):
     except Exception as e:
         print(f"[PURGE source] {e}", flush=True)
 
+async def setup_webhooks():
+    for tag, channel_id in TAG_MAP.items():
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            print(f"[WEBHOOK] Канал #{tag} не найден", flush=True)
+            continue
+        try:
+            existing = None
+            webhooks = await channel.webhooks()   # получаем список
+            for wh in webhooks:
+                if wh.name == "watermark_poster":
+                    existing = wh
+                    break
+
+            if existing is None:
+                existing = await channel.create_webhook(name="watermark_poster")
+
+            WEBHOOKS[channel_id] = existing.url
+            print(f"[WEBHOOK] ✅ #{tag}", flush=True)
+        except Exception as e:
+            print(f"[WEBHOOK] ❌ #{tag}: {e}", flush=True)
 
 # ─────────────────────────────────────────────
 # Автоочистка
@@ -974,6 +1021,7 @@ async def on_ready():
 
     init_db()
     print(f"Бот {bot.user} готов к работе!", flush=True)
+    await setup_webhooks()
 
     # ─── Синхронизация слэш-команд ───
     try:
@@ -1076,14 +1124,14 @@ async def on_message(message: discord.Message):
             await notify_channel_safe(message.channel, embed=embed)
             return
 
-        if len(image_attachments) > 5:
+        if len(image_attachments) > 7:
             print(f"[MSG] ⚠️ Слишком много картинок от {message.author}: {len(image_attachments)}", flush=True)
             await delete_message_safe(message)
             embed = discord.Embed(
                 title="❌ Слишком много скринов",
                 description=(
                     f"Вы прикрепили **{len(image_attachments)}** картинок.\n"
-                    f"Максимум — **5** в одном сообщении.\n\n"
+                    f"Максимум — **10** в одном сообщении.\n\n"
                 ),
                 color=discord.Color.orange(),
             )
@@ -1141,11 +1189,21 @@ async def on_message(message: discord.Message):
 
 @bot.event
 async def on_message_delete(message: discord.Message):
-    if message.author.id != bot.user.id:
+    # Нас интересуют только сообщения в целевых каналах (куда бот публикует)
+    if message.channel.id not in TAG_MAP.values():
         return
 
-    # Проверяем, что это сообщение в одном из целевых каналов
-    if message.channel.id not in TAG_MAP.values():
+    # Отправлено ли это нашим вебхуком или самим ботом
+    is_our_message = False
+
+    if message.author.id == bot.user.id:
+        # Обычная отправка ботом
+        is_our_message = True
+    elif message.webhook_id is not None:
+        # Отправка через вебхук
+        is_our_message = True
+
+    if not is_our_message:
         return
 
     try:
@@ -1158,6 +1216,8 @@ async def on_message_delete(message: discord.Message):
 
         if deleted:
             print(f"[DELETE] ✅ Пост удалён из БД (msg_id={message.id}, канал={message.channel.id})", flush=True)
+        else:
+            print(f"[DELETE] ⚠️ Сообщение {message.id} удалено, но в базе не найдено", flush=True)
     except Exception as e:
         print(f"[DELETE] ❌ Ошибка БД: {e}", flush=True)
 
